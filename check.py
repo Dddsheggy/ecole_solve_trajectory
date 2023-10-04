@@ -6,7 +6,7 @@ from gurobipy import GRB
 
 
 # parameters
-T = 30
+T = 50
 dim_state = 4
 dim_control = 2
 N_control = 6
@@ -20,10 +20,10 @@ matrix_B = np.vstack((1/2*delta_t**2*np.eye(dim_control),delta_t*np.eye(dim_cont
 
 # problem
 # start point
-x_0 = 16
+x_0 = 18
 y_0 = 12.5
 # teminal point
-x_f = 10
+x_f = 4
 y_f = 4
 # velocity and acceleration
 v_max = 20     # m/s
