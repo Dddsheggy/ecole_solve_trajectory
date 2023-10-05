@@ -5,7 +5,7 @@ import glob
 import ecole
 import numpy as np
 
-DATA_MAX_SAMPLES = 100000
+DATA_MAX_SAMPLES = 50000
 
 instances = glob.glob('data/*.mps')
 
@@ -42,13 +42,13 @@ class ExploreThenStrongBranch:
 scip_parameters = {
     "separating/maxrounds": 0,
     "presolving/maxrestarts": 0,
-    "limits/time": 3600,
+    "limits/time": 120,
 }
 
 # tuple observation functions to return complex state information
 env = ecole.environment.Branching(
     observation_function=(
-        ExploreThenStrongBranch(expert_probability=0.05),
+        ExploreThenStrongBranch(expert_probability=0.01),
         ecole.observation.NodeBipartite(),
     ),
     scip_params=scip_parameters,

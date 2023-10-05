@@ -202,7 +202,7 @@ def generate_instance(ins_num, rng):
         
 
 # generate
-ins_num = 10000
+ins_num = 5000
 
 # perfect test instance, keep it
 seed = 9001
