@@ -48,7 +48,7 @@ scip_parameters = {
 # tuple observation functions to return complex state information
 env = ecole.environment.Branching(
     observation_function=(
-        ExploreThenStrongBranch(expert_probability=0.1),
+        ExploreThenStrongBranch(expert_probability=0.05),
         ecole.observation.NodeBipartite(),
     ),
     scip_params=scip_parameters,
