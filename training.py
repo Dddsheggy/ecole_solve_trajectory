@@ -240,19 +240,6 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
 
 policy = GNNPolicy().to(DEVICE)
 
-observation = train_data[0].to(DEVICE)
-observation.variable_features = torch.nan_to_num(observation.variable_features, nan=0.0)
-
-logits = policy(
-    observation.constraint_features,
-    observation.edge_index,
-    observation.edge_attr,
-    observation.variable_features,
-)
-action_distribution = F.softmax(logits[observation.candidates], dim=-1)
-
-print(action_distribution)
-
 
 def process(policy, data_loader, optimizer=None):
     """
@@ -265,6 +252,7 @@ def process(policy, data_loader, optimizer=None):
     with torch.set_grad_enabled(optimizer is not None):
         for batch in data_loader:
             batch = batch.to(DEVICE)
+            batch.variable_features = torch.nan_to_num(batch.variable_features, nan=0.0)
             # Compute the logits (i.e. pre-softmax activations) according to the policy on the concatenated graphs
             logits = policy(
                 batch.constraint_features,
@@ -328,7 +316,10 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=patience, verbose=True)
 best_loss = np.inf
 
-policy_name = "policies/35T_small_policy.pkl"
+policy_dir = "policies/"
+Path(sample_dir).mkdir(exist_ok=False)
+
+policy_name = policy_dir + "35T_small_policy.pkl"
 
 for epoch in range(NB_EPOCHS):
     print(f"Epoch {epoch+1}")
