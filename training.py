@@ -319,7 +319,7 @@ best_loss = np.inf
 policy_dir = "policies/"
 Path(sample_dir).mkdir(exist_ok=False)
 
-policy_name = policy_dir + "35T_small_policy.pkl"
+policy_name = policy_dir + "35T_small_data.pkl"
 
 for epoch in range(NB_EPOCHS):
     print(f"Epoch {epoch+1}")
