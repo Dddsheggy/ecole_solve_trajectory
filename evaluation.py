@@ -2,12 +2,12 @@ import gzip
 import pickle
 from pathlib import Path
 import glob
-
 import ecole
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_geometric
+import pyscipopt
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -107,17 +107,6 @@ class GraphDataset(torch_geometric.data.Dataset):
         return graph
 
 
-sample_dir = "samples/"
-sample_files = [str(path) for path in Path(sample_dir).glob("sample_*.pkl")]
-train_files = sample_files[: int(0.8 * len(sample_files))]
-valid_files = sample_files[int(0.8 * len(sample_files)) :]
-
-train_data = GraphDataset(train_files)
-train_loader = torch_geometric.loader.DataLoader(train_data, batch_size=32, shuffle=True)
-valid_data = GraphDataset(valid_files)
-valid_loader = torch_geometric.loader.DataLoader(valid_data, batch_size=128, shuffle=False)
-
-
 class GNNPolicy(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -165,13 +154,23 @@ class GNNPolicy(torch.nn.Module):
 
         # First step: linear embedding layers to a common dimension (64)
         constraint_features = self.cons_embedding(constraint_features)
+        # print(constraint_features)
+        
         edge_features = self.edge_embedding(edge_features)
+        # print(edge_features)
+
         variable_features = self.var_embedding(variable_features)
+        # print(variable_features)
+
+        # net = self.var_embedding
+        # variable_features = net(variable_features)
+        # return [net, variable_features]
 
         # Two half convolutions
         constraint_features = self.conv_v_to_c(
             variable_features, reversed_edge_indices, edge_features, constraint_features
         )
+
         variable_features = self.conv_c_to_v(
             constraint_features, edge_indices, edge_features, variable_features
         )
@@ -241,109 +240,77 @@ class BipartiteGraphConvolution(torch_geometric.nn.MessagePassing):
 policy = GNNPolicy().to(DEVICE)
 
 
-def process(policy, data_loader, optimizer=None):
-    """
-    This function will process a whole epoch of training or validation, depending on whether an optimizer is provided.
-    """
-    mean_loss = 0
-    mean_acc = 0
+scip_parameters = {
+    "separating/maxrounds": 0,
+    "presolving/maxrestarts": 0,
+    "limits/time": 3600,
+}
+env = ecole.environment.Branching(
+    observation_function=ecole.observation.NodeBipartite(),
+    information_function={
+        "nb_nodes": ecole.reward.NNodes(),
+        "time": ecole.reward.SolvingTime(),
+        "dualintegral": ecole.reward.DualIntegral(),
+        "primalintegral": ecole.reward.PrimalIntegral(),
+        "primaldualintegral": ecole.reward.PrimalDualIntegral(),
+    },
+    scip_params=scip_parameters,
+)
+default_env = ecole.environment.Configuring(
+    observation_function=None,
+    information_function={
+        "nb_nodes": ecole.reward.NNodes(),
+        "time": ecole.reward.SolvingTime(),
+        "dualintegral": ecole.reward.DualIntegral(),
+        "primalintegral": ecole.reward.PrimalIntegral(),
+        "primaldualintegral": ecole.reward.PrimalDualIntegral(),
+    },
+    scip_params=scip_parameters,
+)
 
-    n_samples_processed = 0
-    with torch.set_grad_enabled(optimizer is not None):
-        for batch in data_loader:
-            batch = batch.to(DEVICE)
-            batch.variable_features = torch.nan_to_num(batch.variable_features, nan=0.0)
-            # Compute the logits (i.e. pre-softmax activations) according to the policy on the concatenated graphs
-            logits = policy(
-                batch.constraint_features,
-                batch.edge_index,
-                batch.edge_attr,
-                batch.variable_features,
+NB_EVAL_INSTANCES = 1
+
+instances = ['problem_to_solve/35T_2.mps']
+policy_name = "policies/35T_small_data.pkl"
+policy = torch.load(policy_name)
+
+for instance_count, instance in zip(range(NB_EVAL_INSTANCES), instances):
+    # Run SCIP's default brancher
+    default_env.reset(instance)
+    _, _, _, _, default_info = default_env.step({})
+
+    model_default = default_env.model.as_pyscipopt()
+    default_obj = model_default.getSolObjVal(model_default.getBestSol())
+    default_info["obj"] = default_obj
+    print("default is done!")
+
+    # Run the GNN brancher
+    nb_nodes, time = 0, 0
+    observation, action_set, _, done, info = env.reset(instance)
+    nb_nodes += info["nb_nodes"]
+    time += info["time"]
+    while not done:
+        with torch.no_grad():
+            observation = (
+                torch.from_numpy(observation.row_features.astype(np.float32)).to(DEVICE),
+                torch.from_numpy(observation.edge_features.indices.astype(np.int64)).to(DEVICE),
+                torch.from_numpy(observation.edge_features.values.astype(np.float32)).view(-1, 1).to(DEVICE),
+                torch.from_numpy(observation.column_features.astype(np.float32)).to(DEVICE),
             )
-            # Index the results by the candidates, and split and pad them
-            logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
-            # Compute the usual cross-entropy classification loss
-            loss = F.cross_entropy(logits, batch.candidate_choices)
+            logits = policy(*observation)
+            action = action_set[logits[action_set.astype(np.int64)].argmax()]
+            observation, action_set, _, done, info = env.step(action)
+        nb_nodes += info["nb_nodes"]
+        time += info["time"]
 
-            if optimizer is not None:
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+    model_trained = env.model.as_pyscipopt()
+    obj = model_trained.getSolObjVal(model_trained.getBestSol())
+    info['obj'] = obj
 
-            true_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates)
-            true_bestscore = true_scores.max(dim=-1, keepdims=True).values
-
-            predicted_bestindex = logits.max(dim=-1, keepdims=True).indices
-            accuracy = (
-                (true_scores.gather(-1, predicted_bestindex) == true_bestscore)
-                .float()
-                .mean()
-                .item()
-            )
-
-            mean_loss += loss.item() * batch.num_graphs
-            mean_acc += accuracy * batch.num_graphs
-            n_samples_processed += batch.num_graphs
-
-    mean_loss /= n_samples_processed
-    mean_acc /= n_samples_processed
-    return mean_loss, mean_acc
+    print(f"Instance {instance_count: >3} | SCIP nb nodes    {int(default_info['nb_nodes']): >4d}  | SCIP time   {default_info['time']: >6.2f} ")
+    print(f"             | GNN  nb nodes    {int(nb_nodes): >4d}  | GNN  time   {time: >6.2f} ")
+    print(f"             | Gain         {100*(1-nb_nodes/default_info['nb_nodes']): >8.2f}% | Gain      {100*(1-time/default_info['time']): >8.2f}%")
 
 
-def pad_tensor(input_, pad_sizes, pad_value=-1e8):
-    """
-    This utility function splits a tensor and pads each split to make them all the same size, then stacks them.
-    """
-    max_pad_size = pad_sizes.max()
-    output = input_.split(pad_sizes.cpu().numpy().tolist())
-    output = torch.stack(
-        [
-            F.pad(slice_, (0, max_pad_size - slice_.size(0)), "constant", pad_value)
-            for slice_ in output
-        ],
-        dim=0,
-    )
-    return output
-
-
-lr = 0.001
-NB_EPOCHS = 500
-
-patience = 15
-early_stopping = 30
-
-optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=patience, verbose=True)
-best_loss = np.inf
-
-policy_dir = "policies/"
-Path(policy_dir).mkdir(exist_ok=False)
-
-policy_name = policy_dir + "35T_small_data.pkl"
-
-for epoch in range(NB_EPOCHS):
-    print(f"Epoch {epoch+1}")
-
-    train_loss, train_acc = process(policy, train_loader, optimizer)
-    print(f"Train loss: {train_loss:0.3f}, accuracy {train_acc:0.3f}")
-
-    valid_loss, valid_acc = process(policy, valid_loader, None)
-    print(f"Valid loss: {valid_loss:0.3f}, accuracy {valid_acc:0.3f}")
-
-
-    if valid_loss < best_loss:
-        plateau_count = 0
-        best_loss = valid_loss
-        torch.save(policy, policy_name)
-        print("best model so far")
-    else:
-        plateau_count += 1
-        if plateau_count % early_stopping == 0:
-            print(f"{plateau_count} epochs without improvement, early stopping")
-            break
-        if plateau_count % patience == 0:
-            lr *= 0.2
-            print(f"{plateau_count} epochs without improvement, decreasing learning rate to {lr}")
-    scheduler.step(valid_loss)
-
-torch.save(policy, policy_name)
+print(info)
+print(default_info)
